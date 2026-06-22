@@ -82,6 +82,98 @@ Both RandomForest and XGBoost initially landed on edge-of-grid hyperparameters (
 
 **Current best model: XGBoost, CV accuracy 0.8058.** Progress so far: naive baseline 0.5037 → CryoSleep-rule baseline 0.7131 → best feature-engineered logistic regression 0.7937 → tuned XGBoost 0.8058.
 
+## Comparison to public solutions
+
+Reviewed three public writeups (Samuel Cortinhas's Kaggle "complete guide", SoumyaCO's GitHub repo, Fernandao Lacerda Dantas's Medium writeup, 0.8066 score) plus general search context — public solutions plateau around 0.80-0.82 (top 6-28% of teams; ignore leaderboard #1s, they're known to be leaked-dataset cheats). Our 0.8058 CV score is already in the competitive range.
+
+Gaps identified vs. Samuel Cortinhas's notebook specifically:
+1. Chained imputation (group -> deck -> surname -> destination, reaching 0 missing `HomePlanet` without a global-mode fallback) vs. our single group-backfill + mode fallback.
+2. `Cabin_number` binned into ~300-wide regions, vs. our raw continuous `CabinNum`.
+3. Screens 7 models including LightGBM/CatBoost/SVM/KNN, soft-votes top 2 across 10-fold CV, and tunes the submission classification threshold to match the known target base rate — three techniques we haven't tried.
+
+### Tested: Cabin_region banding (XGBoost, tuned params, 5-fold CV)
+
+| Variant | Mean | Std |
+|---|---|---|
+| Raw CabinNum (continuous) | **0.8058** | 0.0046 |
+| CabinRegion only (banded into 7 regions of 300) | 0.8052 | 0.0083 |
+| Both CabinNum + CabinRegion | 0.8040 | 0.0074 |
+
+**Decision: keep raw CabinNum, skip banding.** Banding helped Samuel because his model lineup includes Logistic Regression/KNN/SVM, which can't discover nonlinear thresholds in a continuous feature on their own — binning hands them that structure. XGBoost is tree-based and can already split on `CabinNum` at any threshold, so pre-binning adds noise (coarser boundaries, more one-hot dimensions) without adding new model capability. Lesson: feature engineering tricks from other writeups are often model-family-specific, not universal — worth testing rather than assuming transfer.
+
+## LightGBM + CatBoost added to model comparison
+
+Grid searched on the same finalized feature set and 5-fold CV. Both initially landed on edge values; expanded grids confirmed/slightly improved:
+
+| Model | Best CV Accuracy | Best Params |
+|---|---|---|
+| **CatBoost** | **0.8072** | `depth=4, iterations=400, learning_rate=0.05` (confirmed interior optimum after expanding depth range to [2,3,4]) |
+| LightGBM | 0.8067 | `num_leaves=10, n_estimators=200, learning_rate=0.05` (still at a lower edge on num_leaves after one expansion; diminishing returns, stopped chasing further) |
+| XGBoost | 0.8058 | (unchanged from before) |
+| RandomForest | 0.8032 | (unchanged from before) |
+| LogisticRegression | 0.7937 | (unchanged from before) |
+
+CatBoost is now the best single model, edging out XGBoost.
+
+## Soft-voting ensemble
+
+Built `VotingClassifier(voting="soft")` combinations using each model's own tuned best params, evaluated with the same 5-fold CV.
+
+**Unweighted ensembles all underperformed CatBoost alone**, and got monotonically worse as weaker models were added:
+
+| Variant | Mean | Std |
+|---|---|---|
+| CatBoost alone | 0.8072 | — |
+| Top 3 boosters (XGB+LGBM+CatBoost), equal weight | 0.8067 | 0.0062 |
+| Top 3 + RandomForest, equal weight | 0.8058 | 0.0074 |
+| All 5 incl. LogisticRegression, equal weight | 0.8054 | 0.0060 |
+
+Diagnosis: unweighted soft-voting treats every model equally regardless of skill, so blending in weaker models (RandomForest 0.8032, LogisticRegression 0.7937) drags the average toward them instead of adding helpful diversity.
+
+**Fix: weight the vote toward the stronger models, and keep the ensemble small.**
+
+| Variant | Mean | Std |
+|---|---|---|
+| **CatBoost + LightGBM, weighted 2:1** | **0.8087** | 0.0049 |
+| CatBoost + LightGBM, equal weight (1:1) | 0.8079 | 0.0064 |
+| CatBoost alone | 0.8072 | — |
+| CatBoost + XGB + LightGBM, weighted 3:2:2 | 0.8062 | 0.0058 |
+
+**Current best model: weighted soft-voting ensemble of CatBoost + LightGBM (2:1), CV accuracy 0.8087.** Even equal-weighting just these two closest competitors beat CatBoost alone, confirming real complementary signal between them — it just needed correct weighting to surface. Adding XGBoost back in made things worse again: XGBoost isn't diverse enough from CatBoost/LightGBM to add value, it just reintroduces the equal-weight drag problem. Lesson: a small, well-weighted ensemble beat every larger one tried — "more models" is not automatically better.
+
+Progress so far: naive baseline 0.5037 -> CryoSleep-rule 0.7131 -> feature-engineered LogisticRegression 0.7937 -> tuned XGBoost 0.8058 -> tuned CatBoost 0.8072 -> weighted CatBoost+LightGBM ensemble 0.8087.
+
+## Broader weight/model combination sweep
+
+Tested 14 more combinations (finer CatBoost:LightGBM ratios, CatBoost+XGB pairs, LightGBM+XGB pairs, triples with XGBoost heavily down-weighted) to check whether the 2:1 CatBoost:LightGBM result was the actual optimum or just a lucky first guess.
+
+| Combination | Mean |
+|---|---|
+| CatBoost+LGBM 3:2 | 0.8087 (tied) |
+| CatBoost+LGBM 2:1 | 0.8087 (tied) |
+| CatBoost+LGBM 5:2 | 0.8081 |
+| CatBoost+LGBM 1:1 | 0.8079 |
+| CatBoost+LGBM+XGB 5:4:1 (XGB barely weighted) | 0.8078 |
+| CatBoost+XGB or LightGBM+XGB (any ratio) | 0.8061-0.8071 |
+
+**Confirmed: CatBoost+LightGBM (no XGBoost) at ~2:1 is the real optimum**, not a lucky single guess — 3:2 ties it exactly. Every combination that includes XGBoost underperforms the plain CatBoost+LightGBM pair, even when XGBoost is down-weighted to 1 part against 5 and 4 — it isn't complementary enough with the other two boosters to earn a place in this ensemble, despite being individually competent alone (0.8058).
+
+## Final model: weighted CatBoost + LightGBM ensemble (2:1), CV accuracy 0.8087
+
+Progress: naive 0.5037 -> CryoSleep-rule 0.7131 -> LogisticRegression 0.7937 -> XGBoost 0.8058 -> CatBoost 0.8072 -> **weighted CatBoost+LightGBM ensemble 0.8087**.
+
+## Threshold tuning (does not help)
+
+Computed out-of-fold predicted probabilities for the final CatBoost+LightGBM (2:1) ensemble via `cross_val_predict`, then tried two ways to pick a better classification threshold than the default 0.5:
+
+| Method | Threshold | OOF Accuracy |
+|---|---|---|
+| Default | 0.500 | 0.8087 |
+| Directly maximize OOF accuracy (sweep thresholds) | 0.500 | 0.8087 (identical — confirms 0.5 is already optimal) |
+| Match training base rate of 50.4% (Samuel Cortinhas's approach) | 0.530 | 0.8066 (worse) |
+
+**Decision: keep the default 0.5 threshold.** Our ensemble's predicted probabilities are already well-calibrated for accuracy, so there's nothing to gain by moving the cutoff. Samuel's base-rate-matching heuristic actively hurt here — it's a useful correction when a model's probabilities are systematically biased toward over/under-predicting the positive class, but ours isn't, so forcing the predicted proportion to match 50.4% just overrode an already-correct threshold. Consistent with the Cabin-banding lesson: techniques from other writeups are conditional on quirks of *their* model, not universally transferable.
+
 ## Next step
 
-Train final XGBoost model on full training data with best params, generate predictions on test.csv, create submission file.
+Train final ensemble (CatBoost+LightGBM, weights 2:1, default 0.5 threshold) on full training data, generate predictions on test.csv, create submission file.
