@@ -16,9 +16,11 @@ data/                  train.csv, test.csv, sample_submission.csv (gitignored �
 notebooks/
   01_eda.ipynb         exploratory analysis: missingness, target relationships, collinearity
   02_baseline_modeling.ipynb   feature ablation, grid search, ensembling, threshold tuning
+  03_generate_submission.ipynb   self-contained final fit + Kaggle submission file generation
 src/
   features.py          shared feature engineering + imputation, used by train and test alike
-EXPERIMENTS.md         full chronological experiment log with every result
+submissions/           generated submission CSVs (gitignored is not needed, small files)
+EXPERIMENTS.md         full chronological experiment log with every result, incl. post-mortem
 requirements.txt       pinned dependencies for the .venv
 ```
 
@@ -60,6 +62,16 @@ help — see below).
 Progression: naive baseline 0.5037 → CryoSleep-rule baseline 0.7131 → feature-engineered
 LogisticRegression 0.7937 → tuned XGBoost 0.8058 → tuned CatBoost 0.8072 → final ensemble
 0.8087.
+
+**Public leaderboard score: 0.80406** — a 0.0046 gap below CV, which is within one standard
+deviation of our own CV fold-to-fold variance (0.0049), so not a red flag on its own. The
+likely real (if small) contributor: we reused the same 5-fold CV split for every one of the
+~60+ decisions logged in `EXPERIMENTS.md` (every feature ablation, grid search, ensemble
+weight, threshold check). Each comparison was individually sound, but collectively,
+repeatedly picking whatever scored best *on the same folds* mildly overfits the pipeline to
+those folds rather than just to the underlying problem. A genuinely untouched final holdout,
+evaluated only once at the very end, would have given a less optimistic estimate. Full
+post-mortem in `EXPERIMENTS.md`.
 
 ## What we tried that didn't work (and why that's useful)
 

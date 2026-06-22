@@ -174,6 +174,54 @@ Computed out-of-fold predicted probabilities for the final CatBoost+LightGBM (2:
 
 **Decision: keep the default 0.5 threshold.** Our ensemble's predicted probabilities are already well-calibrated for accuracy, so there's nothing to gain by moving the cutoff. Samuel's base-rate-matching heuristic actively hurt here — it's a useful correction when a model's probabilities are systematically biased toward over/under-predicting the positive class, but ours isn't, so forcing the predicted proportion to match 50.4% just overrode an already-correct threshold. Consistent with the Cabin-banding lesson: techniques from other writeups are conditional on quirks of *their* model, not universally transferable.
 
+## Final submission
+
+Trained the final model (CatBoost+LightGBM, weighted 2:1, default 0.5 threshold) on the full
+training set, predicted on `test.csv`, submitted to Kaggle.
+
+| | Accuracy |
+|---|---|
+| 5-fold CV estimate | 0.8087 |
+| **Public leaderboard** | **0.80406** |
+| Gap | 0.0046 (0.95 standard deviations of our own CV fold std, 0.0049) |
+
+## Post-mortem: why CV and leaderboard differ
+
+The gap is **within one standard deviation of our own CV fold-to-fold variance** — not a sign
+of a broken pipeline, a leak, or a meaningfully overfit model. If we'd gotten a wildly
+different CV-vs-leaderboard split (multiple points apart) that would have been a red flag
+worth digging into (e.g. a feature leaking target information, or train/test distribution
+mismatch). This isn't that.
+
+That said, there's a real, nameable contributor to why CV likely runs slightly optimistic
+here, beyond pure noise: **we reused the exact same 5-fold CV split (`random_state=42`) for
+every decision in this entire project** — every feature-ablation comparison, every grid
+search, every ensemble-weight sweep, the threshold-tuning check, all ~60+ experiments logged
+in this file. Each individual comparison was sound on its own, but collectively, repeatedly
+picking whatever scored best *on those same folds* means we've implicitly tuned the whole
+pipeline to be good at predicting those specific folds, not just at the underlying problem.
+This is a subtle form of selection bias often missed by individual contributors: no single
+step leaked the target, but the *aggregate of many small "pick the better option" decisions*
+on a fixed validation set inflates the validation estimate a little, even when each step
+followed best practice (CV, not single-split; checked for edge-of-grid; verified
+collinearity findings with CV, etc.).
+
+What would have caught/avoided this: holding out a single untouched test split at the very
+start of the project, only ever evaluating candidate pipelines against it (or even better,
+never looking at it until the literal end), and using the 5-fold CV purely for the internal
+decisions like we did. We didn't do that here, and the cost was small (the leaderboard
+result isn't bad — it's about what the public solutions we reviewed scored), but it is the
+clean reason CV-vs-leaderboard gaps tend to skew optimistic across many-experiment projects
+in general, not just this one.
+
+The public leaderboard score is also computed on roughly half the full test set (Kaggle
+splits public/private), so it carries its own sampling noise on top of everything above —
+the private leaderboard score (revealed at competition end) may land closer to or further
+from 0.8087 than the public score did, by chance alone.
+
 ## Next step
 
-Train final ensemble (CatBoost+LightGBM, weights 2:1, default 0.5 threshold) on full training data, generate predictions on test.csv, create submission file.
+None for now — this is a complete first pass. Possible future directions if revisited:
+surname-derived family size, chained imputation beyond one level of group-backfill, and a
+genuinely held-out final validation split for any future tuning to avoid the optimism bias
+described above.
